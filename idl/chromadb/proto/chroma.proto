@@ -400,7 +400,7 @@ message KNNPlan {
     ScanOperator scan = 1;
     FilterOperator filter = 2;
     KNNOperator knn = 3;
-    ProjectionOperator projection = 4;
+    KNNProjectionOperator projection = 4;
 }
 
 message KNNProjectionRecord {
@@ -412,8 +412,12 @@ message KNNResult {
     repeated KNNProjectionRecord records = 1;
 }
 
+message KNNBatchResult {
+    repeated KNNResult results = 1;
+}
+
 service QueryExecutor {
     rpc Count(CountPlan) returns (CountResult) {}
     rpc Get(GetPlan) returns (GetResult) {}
-    rpc KNN(KNNPlan) returns (KNNResult) {}
+    rpc KNN(KNNPlan) returns (KNNBatchResult) {}
 }

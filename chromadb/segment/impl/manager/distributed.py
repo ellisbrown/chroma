@@ -1,25 +1,24 @@
+from collections import defaultdict
 from threading import Lock
+from typing import Dict, Optional, Sequence, Type
+from uuid import UUID, uuid4
+
+from overrides import override
+
+from chromadb.config import System, get_class
+from chromadb.db.system import SysDB
 from chromadb.segment import (
     SegmentImplementation,
     SegmentManager,
-    MetadataReader,
     SegmentType,
-    VectorReader,
-    S,
 )
-from chromadb.config import System, get_class
-from chromadb.db.system import SysDB
-from overrides import override
 from chromadb.segment.distributed import SegmentDirectory
 from chromadb.telemetry.opentelemetry import (
     OpenTelemetryClient,
     OpenTelemetryGranularity,
     trace_method,
 )
-from chromadb.types import Collection, Operation, Segment, SegmentScope, Metadata
-from typing import Dict, Type, Sequence, Optional, cast
-from uuid import UUID, uuid4
-from collections import defaultdict
+from chromadb.types import Collection, Metadata, Operation, Segment, SegmentScope
 
 # TODO: it is odd that the segment manager is different for distributed vs local
 # implementations.  This should be refactored to be more consistent and shared.
@@ -82,33 +81,27 @@ class DistributedSegmentManager(SegmentManager):
         "DistributedSegmentManager.get_segment",
         OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
     )
-    def get_segment(self, collection_id: UUID, type: Type[S]) -> S:
-        if type == MetadataReader:
-            scope = SegmentScope.METADATA
-        elif type == VectorReader:
-            scope = SegmentScope.VECTOR
-        else:
-            raise ValueError(f"Invalid segment type: {type}")
-
+    def get_segment(self, collection_id: UUID, scope: SegmentScope) -> Segment:
         if scope not in self._segment_cache[collection_id]:
             segments = self._sysdb.get_segments(collection=collection_id, scope=scope)
             known_types = set([k.value for k in SEGMENT_TYPE_IMPLS.keys()])
             # Get the first segment of a known type
             segment = next(filter(lambda s: s["type"] in known_types, segments))
-            grpc_url = self._segment_directory.get_segment_endpoint(segment)
-            if segment["metadata"] is not None:
-                segment["metadata"]["grpc_url"] = grpc_url  # type: ignore
-            else:
-                segment["metadata"] = {"grpc_url": grpc_url}
             # TODO: Register a callback to update the segment when it gets moved
             # self._segment_directory.register_updated_segment_callback()
             self._segment_cache[collection_id][scope] = segment
+        return self._segment_cache[collection_id][scope]
 
-        # Instances must be atomically created, so we use a lock to ensure that only one thread
-        # creates the instance.
-        with self._lock:
-            instance = self._instance(self._segment_cache[collection_id][scope])
-        return cast(S, instance)
+    @trace_method(
+        "DistributedSegmentManager.get_endpoint",
+        OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
+    )
+    def get_endpoint(self, collection_id: UUID) -> str:
+        # Get grpc endpoint from record segment. Since grpc endpoint is endpoint is
+        # determined by collection uuid, the endpoint should be the same for all
+        # segments of the same collection
+        record_segment = self.get_segment(collection_id, SegmentScope.RECORD)
+        return self._segment_directory.get_segment_endpoint(record_segment)
 
     @trace_method(
         "DistributedSegmentManager.hint_use_collection",

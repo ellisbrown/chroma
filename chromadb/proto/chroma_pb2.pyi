@@ -557,8 +557,8 @@ class KNNPlan(_message.Message):
     scan: ScanOperator
     filter: FilterOperator
     knn: KNNOperator
-    projection: ProjectionOperator
-    def __init__(self, scan: _Optional[_Union[ScanOperator, _Mapping]] = ..., filter: _Optional[_Union[FilterOperator, _Mapping]] = ..., knn: _Optional[_Union[KNNOperator, _Mapping]] = ..., projection: _Optional[_Union[ProjectionOperator, _Mapping]] = ...) -> None: ...
+    projection: KNNProjectionOperator
+    def __init__(self, scan: _Optional[_Union[ScanOperator, _Mapping]] = ..., filter: _Optional[_Union[FilterOperator, _Mapping]] = ..., knn: _Optional[_Union[KNNOperator, _Mapping]] = ..., projection: _Optional[_Union[KNNProjectionOperator, _Mapping]] = ...) -> None: ...
 
 class KNNProjectionRecord(_message.Message):
     __slots__ = ("record", "distance")
@@ -573,3 +573,9 @@ class KNNResult(_message.Message):
     RECORDS_FIELD_NUMBER: _ClassVar[int]
     records: _containers.RepeatedCompositeFieldContainer[KNNProjectionRecord]
     def __init__(self, records: _Optional[_Iterable[_Union[KNNProjectionRecord, _Mapping]]] = ...) -> None: ...
+
+class KNNBatchResult(_message.Message):
+    __slots__ = ("results",)
+    RESULTS_FIELD_NUMBER: _ClassVar[int]
+    results: _containers.RepeatedCompositeFieldContainer[KNNResult]
+    def __init__(self, results: _Optional[_Iterable[_Union[KNNResult, _Mapping]]] = ...) -> None: ...

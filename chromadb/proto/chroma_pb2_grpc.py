@@ -227,7 +227,7 @@ class QueryExecutorStub(object):
         self.KNN = channel.unary_unary(
                 '/chroma.QueryExecutor/KNN',
                 request_serializer=chromadb_dot_proto_dot_chroma__pb2.KNNPlan.SerializeToString,
-                response_deserializer=chromadb_dot_proto_dot_chroma__pb2.KNNResult.FromString,
+                response_deserializer=chromadb_dot_proto_dot_chroma__pb2.KNNBatchResult.FromString,
                 )
 
 
@@ -268,7 +268,7 @@ def add_QueryExecutorServicer_to_server(servicer, server):
             'KNN': grpc.unary_unary_rpc_method_handler(
                     servicer.KNN,
                     request_deserializer=chromadb_dot_proto_dot_chroma__pb2.KNNPlan.FromString,
-                    response_serializer=chromadb_dot_proto_dot_chroma__pb2.KNNResult.SerializeToString,
+                    response_serializer=chromadb_dot_proto_dot_chroma__pb2.KNNBatchResult.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -327,6 +327,6 @@ class QueryExecutor(object):
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/chroma.QueryExecutor/KNN',
             chromadb_dot_proto_dot_chroma__pb2.KNNPlan.SerializeToString,
-            chromadb_dot_proto_dot_chroma__pb2.KNNResult.FromString,
+            chromadb_dot_proto_dot_chroma__pb2.KNNBatchResult.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

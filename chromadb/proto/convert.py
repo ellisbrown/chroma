@@ -1,26 +1,48 @@
+from typing import Dict, Optional, Sequence, Tuple, TypedDict, Union, cast
 from uuid import UUID
-from typing import Dict, Optional, Tuple, Union, cast
-from chromadb.api.configuration import CollectionConfigurationInternal
-from chromadb.api.types import Embedding
+
+import numpy as np
+from numpy.typing import NDArray
+
 import chromadb.proto.chroma_pb2 as proto
+from chromadb.api.configuration import CollectionConfigurationInternal
+from chromadb.api.types import Embedding, Where, WhereDocument
+from chromadb.execution.expression.operator import (
+    KNN,
+    Filter,
+    Limit,
+    Projection,
+    SegmentScan,
+)
+from chromadb.execution.expression.plan import CountPlan, GetPlan, KNNPlan
 from chromadb.types import (
     Collection,
     LogRecord,
     Metadata,
     Operation,
+    OperationRecord,
     RequestVersionContext,
     ScalarEncoding,
     Segment,
     SegmentScope,
     SeqId,
-    OperationRecord,
     UpdateMetadata,
     Vector,
     VectorEmbeddingRecord,
     VectorQueryResult,
 )
-import numpy as np
-from numpy.typing import NDArray
+
+
+class ProjectionRecord(TypedDict):
+    id: str
+    document: Optional[str]
+    embedding: Optional[Vector]
+    metadata: Optional[Metadata]
+
+
+class KNNProjectionRecord(TypedDict):
+    record: ProjectionRecord
+    distance: Optional[float]
 
 
 # TODO: Unit tests for this file, handling optional states etc
@@ -314,3 +336,336 @@ def to_proto_request_version_context(
         collection_version=request_version_context["collection_version"],
         log_position=request_version_context["log_position"],
     )
+
+
+def to_proto_where(where: Where) -> proto.Where:
+    response = proto.Where()
+    if len(where) != 1:
+        raise ValueError(f"Expected where to have exactly one operator, got {where}")
+
+    for key, value in where.items():
+        if not isinstance(key, str):
+            raise ValueError(f"Expected where key to be a str, got {key}")
+
+        if key == "$and" or key == "$or":
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"Expected where value for $and or $or to be a list of where expressions, got {value}"
+                )
+            children: proto.WhereChildren = proto.WhereChildren(
+                children=[to_proto_where(w) for w in value]
+            )
+            if key == "$and":
+                children.operator = proto.BooleanOperator.AND
+            else:
+                children.operator = proto.BooleanOperator.OR
+
+            response.children.CopyFrom(children)
+            return response
+
+        # At this point we know we're at a direct comparison. It can either
+        # be of the form {"key": "value"} or {"key": {"$operator": "value"}}.
+
+        dc = proto.DirectComparison()
+        dc.key = key
+
+        if not isinstance(value, dict):
+            # {'key': 'value'} case
+            if type(value) is str:
+                ssc = proto.SingleStringComparison()
+                ssc.value = value
+                ssc.comparator = proto.GenericComparator.EQ
+                dc.single_string_operand.CopyFrom(ssc)
+            elif type(value) is bool:
+                sbc = proto.SingleBoolComparison()
+                sbc.value = value
+                sbc.comparator = proto.GenericComparator.EQ
+                dc.single_bool_operand.CopyFrom(sbc)
+            elif type(value) is int:
+                sic = proto.SingleIntComparison()
+                sic.value = value
+                sic.generic_comparator = proto.GenericComparator.EQ
+                dc.single_int_operand.CopyFrom(sic)
+            elif type(value) is float:
+                sdc = proto.SingleDoubleComparison()
+                sdc.value = value
+                sdc.generic_comparator = proto.GenericComparator.EQ
+                dc.single_double_operand.CopyFrom(sdc)
+            else:
+                raise ValueError(
+                    f"Expected where value to be a string, int, or float, got {value}"
+                )
+        else:
+            for operator, operand in value.items():
+                if operator in ["$in", "$nin"]:
+                    if not isinstance(operand, list):
+                        raise ValueError(
+                            f"Expected where value for $in or $nin to be a list of values, got {value}"
+                        )
+                    if len(operand) == 0 or not all(
+                        isinstance(x, type(operand[0])) for x in operand
+                    ):
+                        raise ValueError(
+                            f"Expected where operand value to be a non-empty list, and all values to be of the same type "
+                            f"got {operand}"
+                        )
+                    list_operator = None
+                    if operator == "$in":
+                        list_operator = proto.ListOperator.IN
+                    else:
+                        list_operator = proto.ListOperator.NIN
+                    if type(operand[0]) is str:
+                        slo = proto.StringListComparison()
+                        for x in operand:
+                            slo.values.extend([x])  # type: ignore
+                        slo.list_operator = list_operator
+                        dc.string_list_operand.CopyFrom(slo)
+                    elif type(operand[0]) is bool:
+                        blo = proto.BoolListComparison()
+                        for x in operand:
+                            blo.values.extend([x])  # type: ignore
+                        blo.list_operator = list_operator
+                        dc.bool_list_operand.CopyFrom(blo)
+                    elif type(operand[0]) is int:
+                        ilo = proto.IntListComparison()
+                        for x in operand:
+                            ilo.values.extend([x])  # type: ignore
+                        ilo.list_operator = list_operator
+                        dc.int_list_operand.CopyFrom(ilo)
+                    elif type(operand[0]) is float:
+                        dlo = proto.DoubleListComparison()
+                        for x in operand:
+                            dlo.values.extend([x])  # type: ignore
+                        dlo.list_operator = list_operator
+                        dc.double_list_operand.CopyFrom(dlo)
+                    else:
+                        raise ValueError(
+                            f"Expected where operand value to be a list of strings, ints, or floats, got {operand}"
+                        )
+                elif operator in ["$eq", "$ne", "$gt", "$lt", "$gte", "$lte"]:
+                    # Direct comparison to a single value.
+                    if type(operand) is str:
+                        ssc = proto.SingleStringComparison()
+                        ssc.value = operand
+                        if operator == "$eq":
+                            ssc.comparator = proto.GenericComparator.EQ
+                        elif operator == "$ne":
+                            ssc.comparator = proto.GenericComparator.NE
+                        else:
+                            raise ValueError(
+                                f"Expected where operator to be $eq or $ne, got {operator}"
+                            )
+                        dc.single_string_operand.CopyFrom(ssc)
+                    elif type(operand) is bool:
+                        sbc = proto.SingleBoolComparison()
+                        sbc.value = operand
+                        if operator == "$eq":
+                            sbc.comparator = proto.GenericComparator.EQ
+                        elif operator == "$ne":
+                            sbc.comparator = proto.GenericComparator.NE
+                        else:
+                            raise ValueError(
+                                f"Expected where operator to be $eq or $ne, got {operator}"
+                            )
+                        dc.single_bool_operand.CopyFrom(sbc)
+                    elif type(operand) is int:
+                        sic = proto.SingleIntComparison()
+                        sic.value = operand
+                        if operator == "$eq":
+                            sic.generic_comparator = proto.GenericComparator.EQ
+                        elif operator == "$ne":
+                            sic.generic_comparator = proto.GenericComparator.NE
+                        elif operator == "$gt":
+                            sic.number_comparator = proto.NumberComparator.GT
+                        elif operator == "$lt":
+                            sic.number_comparator = proto.NumberComparator.LT
+                        elif operator == "$gte":
+                            sic.number_comparator = proto.NumberComparator.GTE
+                        elif operator == "$lte":
+                            sic.number_comparator = proto.NumberComparator.LTE
+                        else:
+                            raise ValueError(
+                                f"Expected where operator to be one of $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
+                            )
+                        dc.single_int_operand.CopyFrom(sic)
+                    elif type(operand) is float:
+                        sfc = proto.SingleDoubleComparison()
+                        sfc.value = operand
+                        if operator == "$eq":
+                            sfc.generic_comparator = proto.GenericComparator.EQ
+                        elif operator == "$ne":
+                            sfc.generic_comparator = proto.GenericComparator.NE
+                        elif operator == "$gt":
+                            sfc.number_comparator = proto.NumberComparator.GT
+                        elif operator == "$lt":
+                            sfc.number_comparator = proto.NumberComparator.LT
+                        elif operator == "$gte":
+                            sfc.number_comparator = proto.NumberComparator.GTE
+                        elif operator == "$lte":
+                            sfc.number_comparator = proto.NumberComparator.LTE
+                        else:
+                            raise ValueError(
+                                f"Expected where operator to be one of $eq, $ne, $gt, $lt, $gte, $lte, got {operator}"
+                            )
+                        dc.single_double_operand.CopyFrom(sfc)
+                    else:
+                        raise ValueError(
+                            f"Expected where operand value to be a string, int, or float, got {operand}"
+                        )
+                else:
+                    # This case should never happen, as we've already
+                    # handled the case for direct comparisons.
+                    pass
+
+        response.direct_comparison.CopyFrom(dc)
+    return response
+
+
+def to_proto_where_document(where_document: WhereDocument) -> proto.WhereDocument:
+    response = proto.WhereDocument()
+    if len(where_document) != 1:
+        raise ValueError(
+            f"Expected where_document to have exactly one operator, got {where_document}"
+        )
+
+    for operator, operand in where_document.items():
+        if operator == "$and" or operator == "$or":
+            # Nested "$and" or "$or" expression.
+            if not isinstance(operand, list):
+                raise ValueError(
+                    f"Expected where_document value for $and or $or to be a list of where_document expressions, got {operand}"
+                )
+            children: proto.WhereDocumentChildren = proto.WhereDocumentChildren(
+                children=[to_proto_where_document(w) for w in operand]
+            )
+            if operator == "$and":
+                children.operator = proto.BooleanOperator.AND
+            else:
+                children.operator = proto.BooleanOperator.OR
+
+            response.children.CopyFrom(children)
+        else:
+            # Direct "$contains" or "$not_contains" comparison to a single
+            # value.
+            if not isinstance(operand, str):
+                raise ValueError(
+                    f"Expected where_document operand to be a string, got {operand}"
+                )
+            dwd = proto.DirectWhereDocument()
+            dwd.document = operand
+            if operator == "$contains":
+                dwd.operator = proto.WhereDocumentOperator.CONTAINS
+            elif operator == "$not_contains":
+                dwd.operator = proto.WhereDocumentOperator.NOT_CONTAINS
+            else:
+                raise ValueError(
+                    f"Expected where_document operator to be one of $contains, $not_contains, got {operator}"
+                )
+            response.direct.CopyFrom(dwd)
+
+    return response
+
+
+def to_proto_scan(scan: SegmentScan) -> proto.ScanOperator:
+    return proto.ScanOperator(
+        collection=to_proto_collection(scan.collection),
+        knn_id=scan.knn_id.hex,
+        metadata_id=scan.metadata_id.hex,
+        record_id=scan.record_id.hex,
+    )
+
+
+def to_proto_filter(filter: Filter) -> proto.FilterOperator:
+    return proto.FilterOperator(
+        ids=proto.UserIds(ids=filter.user_ids),
+        where=to_proto_where(filter.where) if filter.where is not None else None,
+        where_document=to_proto_where_document(filter.where_document)
+        if filter.where_document is not None
+        else None,
+    )
+
+
+def to_proto_knn(knn: KNN) -> proto.KNNOperator:
+    return proto.KNNOperator(
+        embeddings=[
+            to_proto_vector(vector=embedding, encoding=ScalarEncoding)
+            for embedding in knn.embeddings
+        ],
+        fetch=knn.fetch,
+    )
+
+
+def to_proto_limit(limit: Limit) -> proto.LimitOperator:
+    return proto.LimitOperator(skip=limit.skip, fetch=limit.fetch)
+
+
+def to_proto_projection(projection: Projection) -> proto.ProjectionOperator:
+    return proto.ProjectionOperator(
+        document=projection.document,
+        embedding=projection.embedding,
+        metadata=projection.metadata,
+    )
+
+
+def to_proto_knn_projection(projection: Projection) -> proto.KNNProjectionOperator:
+    return proto.KNNProjectionOperator(
+        projection=to_proto_projection(projection), distance=projection.rank
+    )
+
+
+def to_proto_count_plan(count: CountPlan) -> proto.CountPlan:
+    return proto.CountPlan(scan=to_proto_scan(count.scan))
+
+
+def from_proto_count_result(result: proto.CountResult) -> int:
+    return result.count
+
+
+def to_proto_get_plan(get: GetPlan) -> proto.GetPlan:
+    return proto.GetPlan(
+        scan=to_proto_scan(get.scan),
+        filter=to_proto_filter(get.filter),
+        limit=to_proto_limit(get.limit),
+        projection=to_proto_projection(get.projection),
+    )
+
+
+def from_proto_projection_record(record: proto.ProjectionRecord) -> ProjectionRecord:
+    return ProjectionRecord(
+        id=record.id,
+        document=record.document,
+        embedding=from_proto_vector(record.vector)[0]
+        if record.vector is not None
+        else None,
+        metadata=from_proto_metadata(record.metadata),
+    )
+
+
+def from_proto_get_result(result: proto.GetResult) -> Sequence[ProjectionRecord]:
+    return [from_proto_projection_record(record) for record in result.records]
+
+
+def to_proto_knn_plan(knn: KNNPlan) -> proto.KNNPlan:
+    return proto.KNNPlan(
+        scan=to_proto_scan(knn.scan),
+        filter=to_proto_filter(knn.filter),
+        knn=to_proto_knn(knn.knn),
+        projection=to_proto_knn_projection(knn.projection),
+    )
+
+
+def from_proto_knn_projection_record(
+    record: proto.KNNProjectionRecord,
+) -> KNNProjectionRecord:
+    return KNNProjectionRecord(
+        record=from_proto_projection_record(record.record), distance=record.distance
+    )
+
+
+def from_proto_knn_batch_result(
+    results: proto.KNNBatchResult,
+) -> Sequence[Sequence[KNNProjectionRecord]]:
+    return [
+        [from_proto_knn_projection_record(record) for record in result.records]
+        for result in results.results
+    ]
