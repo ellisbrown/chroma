@@ -1,33 +1,29 @@
 use std::iter::once;
+use std::str::FromStr;
 
 use crate::config::QueryServiceConfig;
 use crate::execution::dispatcher::Dispatcher;
 use crate::execution::operators::fetch_log::FetchLogOperator;
 use crate::execution::operators::fetch_segment::FetchSegmentOperator;
-use crate::execution::operators::filter::FilterOperator;
-use crate::execution::operators::knn::KnnOperator;
 use crate::execution::operators::knn_projection::KnnProjectionOperator;
-use crate::execution::operators::limit::LimitOperator;
-use crate::execution::operators::projection::ProjectionOperator;
 use crate::execution::orchestration::get::GetOrchestrator;
 use crate::execution::orchestration::knn::{KnnError, KnnFilterOrchestrator, KnnOrchestrator};
-use crate::execution::orchestration::{CountQueryOrchestrator, GetVectorsOrchestrator};
+use crate::execution::orchestration::CountQueryOrchestrator;
 use crate::log::log::Log;
 use crate::sysdb::sysdb::SysDb;
 use crate::system::{ComponentHandle, System};
 use crate::tracing::util::wrap_span_with_parent_context;
+use crate::utils::convert::{from_proto_knn, to_proto_knn_batch_result};
 use async_trait::async_trait;
 use chroma_blockstore::provider::BlockfileProvider;
 use chroma_config::Configurable;
 use chroma_error::ChromaError;
 use chroma_index::hnsw_provider::HnswIndexProvider;
+use chroma_types::chroma_proto::query_executor_server::QueryExecutor;
 use chroma_types::chroma_proto::{
-    self, CountRecordsRequest, CountRecordsResponse, QueryMetadataRequest, QueryMetadataResponse,
+    self, CountPlan, CountResult, GetPlan, GetResult, KnnBatchResult, KnnPlan,
 };
-use chroma_types::chroma_proto::{
-    GetVectorsRequest, GetVectorsResponse, QueryVectorsRequest, QueryVectorsResponse,
-};
-use chroma_types::{CollectionUuid, MetadataValue, ScalarEncoding, Where};
+use chroma_types::CollectionUuid;
 use futures::future::try_join_all;
 use tokio::signal::unix::{signal, SignalKind};
 use tonic::{transport::Server, Request, Response, Status};
@@ -99,13 +95,9 @@ impl WorkerServer {
     pub(crate) async fn run(worker: WorkerServer) -> Result<(), Box<dyn std::error::Error>> {
         let addr = format!("[::]:{}", worker.port).parse().unwrap();
         println!("Worker listening on {}", addr);
-        let server = Server::builder()
-            .add_service(chroma_proto::vector_reader_server::VectorReaderServer::new(
-                worker.clone(),
-            ))
-            .add_service(
-                chroma_proto::metadata_reader_server::MetadataReaderServer::new(worker.clone()),
-            );
+        let server = Server::builder().add_service(
+            chroma_proto::query_executor_server::QueryExecutorServer::new(worker.clone()),
+        );
 
         #[cfg(debug_assertions)]
         let server =
@@ -135,562 +127,241 @@ impl WorkerServer {
         self.system = Some(system);
     }
 
-    pub(crate) async fn query_vectors_instrumented(
+    fn decompose_proto_scan(
         &self,
-        request: Request<QueryVectorsRequest>,
-    ) -> Result<Response<QueryVectorsResponse>, Status> {
-        let request = request.into_inner();
-        let segment_uuid = match Uuid::parse_str(&request.segment_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Segment UUID"));
-            }
-        };
-
-        let collection_uuid = match Uuid::parse_str(&request.collection_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Collection UUID"));
-            }
-        };
-        let collection_uuid = CollectionUuid(collection_uuid);
-
-        let (collection_version, log_position) = match request.version_context {
-            Some(version_context) => (
-                version_context.collection_version,
-                version_context.log_position,
-            ),
-            None => {
-                return Err(Status::invalid_argument("No version context provided"));
-            }
-        };
-
-        let mut proto_results_for_all = Vec::new();
-
-        let mut query_vectors = Vec::new();
-        for proto_query_vector in request.vectors {
-            let (query_vector, _encoding) = match proto_query_vector.try_into() {
-                Ok((vector, encoding)) => (vector, encoding),
-                Err(e) => {
-                    return Err(Status::internal(format!("Error converting vector: {}", e)));
-                }
-            };
-            query_vectors.push(query_vector);
-        }
-
-        let dispatcher = match self.dispatcher {
-            Some(ref dispatcher) => dispatcher.clone(),
-            None => {
-                return Err(Status::internal("No dispatcher found"));
-            }
-        };
-
-        let system = match self.system {
-            Some(ref system) => system,
-            None => {
-                tracing::error!("No system found");
-                return Err(Status::internal("No system found"));
-            }
-        };
-
-        let knn_filter_orchestrator = KnnFilterOrchestrator::new(
-            self.blockfile_provider.clone(),
-            dispatcher.clone(),
-            // TODO: Load the configuration for this
-            1000,
+        scan: chroma_proto::ScanOperator,
+    ) -> Result<(FetchLogOperator, FetchSegmentOperator), Status> {
+        let collection = scan
+            .collection
+            .ok_or(Status::invalid_argument("Invalid Collection"))?;
+        let collection_uuid = CollectionUuid::from_str(&collection.id)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let knn_uuid = Uuid::parse_str(&collection.id)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let metadata_uuid = Uuid::parse_str(&collection.id)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let record_uuid = Uuid::parse_str(&collection.id)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        Ok((
             FetchLogOperator {
                 log_client: self.log.clone(),
+                // TODO: Make this configurable
                 batch_size: 100,
-                start_log_offset_id: log_position as u32 + 1,
+                start_log_offset_id: collection.log_position as u32 + 1,
                 maximum_fetch_count: None,
                 collection_uuid,
             },
             FetchSegmentOperator {
                 sysdb: self.sysdb.clone(),
                 collection_uuid,
-                collection_version,
-                metadata_uuid: None,
-                record_uuid: None,
-                vector_uuid: Some(segment_uuid),
+                collection_version: collection.version as u32,
+                metadata_uuid,
+                record_uuid,
+                vector_uuid: knn_uuid,
             },
-            FilterOperator {
-                query_ids: (!request.allowed_ids.is_empty()).then_some(request.allowed_ids),
-                where_clause: None,
-            },
+        ))
+    }
+
+    async fn orchestrate_count(
+        &self,
+        count: Request<CountPlan>,
+    ) -> Result<Response<CountResult>, Status> {
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or(Status::internal("Dispatcher is not initialized"))?;
+        let system = self
+            .system
+            .as_ref()
+            .ok_or(Status::internal("System is not initialized"))?;
+
+        let scan = count
+            .into_inner()
+            .scan
+            .ok_or(Status::invalid_argument("Invalid Scan Operator"))?;
+        let (fetch_log_operator, fetch_segment_operator) = self.decompose_proto_scan(scan)?;
+
+        // TODO: Update Count Orchestractor
+        let counter = CountQueryOrchestrator::new(
+            system.clone(),
+            &fetch_segment_operator.metadata_uuid,
+            &fetch_log_operator.collection_uuid,
+            fetch_log_operator.log_client,
+            fetch_segment_operator.sysdb,
+            dispatcher.clone(),
+            self.blockfile_provider.clone(),
+            fetch_segment_operator.collection_version,
+            fetch_log_operator.start_log_offset_id as u64,
         );
 
-        let knn_filter_output = match knn_filter_orchestrator.run(system.clone()).await {
+        match counter.run().await {
+            Ok(count) => Ok(Response::new(CountResult {
+                count: count as u32,
+            })),
+            Err(err) => Err(Status::new(err.code().into(), err.to_string())),
+        }
+    }
+
+    async fn orchestrate_get(&self, get: Request<GetPlan>) -> Result<Response<GetResult>, Status> {
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or(Status::internal("Dispatcher is not initialized"))?;
+        let system = self
+            .system
+            .as_ref()
+            .ok_or(Status::internal("System is not initialized"))?;
+
+        let get_inner = get.into_inner();
+        let scan = get_inner
+            .scan
+            .ok_or(Status::invalid_argument("Invalid Scan Operator"))?;
+        let (fetch_log_operator, fetch_segment_operator) = self.decompose_proto_scan(scan)?;
+        let filter = get_inner
+            .filter
+            .ok_or(Status::invalid_argument("Invalid Filter Operator"))?;
+        let limit = get_inner
+            .limit
+            .ok_or(Status::invalid_argument("Invalid Scan Operator"))?;
+        let projection = get_inner
+            .projection
+            .ok_or(Status::invalid_argument("Invalid Projection Operator"))?;
+
+        let getter = GetOrchestrator::new(
+            self.blockfile_provider.clone(),
+            dispatcher.clone(),
+            // TODO: Make this configurable
+            1000,
+            fetch_log_operator,
+            fetch_segment_operator,
+            filter.try_into()?,
+            limit.into(),
+            projection.into(),
+        );
+
+        match getter.run(system.clone()).await {
+            Ok(result) => Ok(Response::new(result.try_into()?)),
+            Err(err) => Err(Status::new(err.code().into(), err.to_string())),
+        }
+    }
+
+    async fn orchestrate_knn(
+        &self,
+        knn: Request<KnnPlan>,
+    ) -> Result<Response<KnnBatchResult>, Status> {
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or(Status::internal("Dispatcher is not initialized"))?;
+        let system = self
+            .system
+            .as_ref()
+            .ok_or(Status::internal("System is not initialized"))?;
+
+        let knn_inner = knn.into_inner();
+        let scan = knn_inner
+            .scan
+            .ok_or(Status::invalid_argument("Invalid Scan Operator"))?;
+        let (fetch_log_operator, fetch_segment_operator) = self.decompose_proto_scan(scan)?;
+        let filter = knn_inner
+            .filter
+            .ok_or(Status::invalid_argument("Invalid Filter Operator"))?;
+        let knn = knn_inner
+            .knn
+            .ok_or(Status::invalid_argument("Invalid Scan Operator"))?;
+
+        let sieve = KnnFilterOrchestrator::new(
+            self.blockfile_provider.clone(),
+            dispatcher.clone(),
+            // TODO: Make this configurable
+            1000,
+            fetch_log_operator,
+            fetch_segment_operator,
+            filter.try_into()?,
+        );
+
+        let matching_records = match sieve.run(system.clone()).await {
             Ok(output) => output,
             Err(KnnError::EmptyCollection) => {
-                return Ok(Response::new(chroma_proto::QueryVectorsResponse {
-                    results: once(chroma_proto::VectorQueryResults {
-                        results: Vec::new(),
-                    })
-                    .cycle()
-                    .take(query_vectors.len())
-                    .collect(),
-                }));
+                return Ok(Response::new(to_proto_knn_batch_result(
+                    once(Default::default())
+                        .cycle()
+                        .take(knn.embeddings.len())
+                        .collect(),
+                )?));
             }
             Err(e) => {
-                tracing::error!("Error running orchestrator: {}", e);
-                return Err(Status::new(
-                    e.code().into(),
-                    format!("Error running orchestrator: {}", e),
-                ));
+                return Err(Status::new(e.code().into(), e.to_string()));
             }
         };
 
-        let embedding_dim = query_vectors[0].len();
+        let projection = knn_inner
+            .projection
+            .ok_or(Status::invalid_argument("Invalid Projection Operator"))?;
+        let knn_projection = KnnProjectionOperator::try_from(projection)?;
 
-        let knn_orchestrators: Vec<_> = query_vectors
-            .into_iter()
-            .map(|embedding| {
-                KnnOrchestrator::new(
-                    self.blockfile_provider.clone(),
-                    dispatcher.clone(),
-                    self.hnsw_index_provider.clone(),
-                    // TODO: Load the configuration for this
-                    1000,
-                    knn_filter_output.clone(),
-                    KnnOperator {
-                        embedding,
-                        fetch: request.k as u32,
-                    },
-                    KnnProjectionOperator {
-                        projection: ProjectionOperator {
-                            document: false,
-                            embedding: request.include_embeddings,
-                            metadata: false,
-                        },
-                        distance: true,
-                    },
-                )
-            })
-            .collect();
-
-        let result = try_join_all(
-            knn_orchestrators
+        match try_join_all(
+            from_proto_knn(knn)?
                 .into_iter()
-                .map(|knn| knn.run(system.clone())),
+                .map(|knn| {
+                    KnnOrchestrator::new(
+                        self.blockfile_provider.clone(),
+                        dispatcher.clone(),
+                        self.hnsw_index_provider.clone(),
+                        // TODO: Make this configurable
+                        1000,
+                        matching_records.clone(),
+                        knn,
+                        knn_projection.clone(),
+                    )
+                })
+                .map(|knner| knner.run(system.clone())),
         )
-        .await;
-
-        let result = match result {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::error!("Error running orchestrator: {}", e);
-                return Err(Status::new(
-                    e.code().into(),
-                    format!("Error running orchestrator: {}", e),
-                ));
-            }
-        };
-
-        for result_set in result {
-            let mut proto_results = Vec::new();
-            for query_result in result_set.records {
-                let proto_result = chroma_proto::VectorQueryResult {
-                    id: query_result.record.id,
-                    distance: query_result
-                        .distance
-                        .expect("The distance should be present"),
-                    vector: match query_result.record.embedding {
-                        Some(vector) => {
-                            match (vector, ScalarEncoding::FLOAT32, embedding_dim).try_into() {
-                                Ok(proto_vector) => Some(proto_vector),
-                                Err(e) => {
-                                    return Err(Status::internal(format!(
-                                        "Error converting vector: {}",
-                                        e
-                                    )));
-                                }
-                            }
-                        }
-                        None => None,
-                    },
-                };
-                proto_results.push(proto_result);
-            }
-            proto_results_for_all.push(chroma_proto::VectorQueryResults {
-                results: proto_results,
-            });
+        .await
+        {
+            Ok(results) => Ok(Response::new(to_proto_knn_batch_result(results)?)),
+            Err(err) => Err(Status::new(err.code().into(), err.to_string())),
         }
-
-        let resp = chroma_proto::QueryVectorsResponse {
-            results: proto_results_for_all,
-        };
-
-        Ok(Response::new(resp))
-    }
-
-    async fn get_vectors_instrumented(
-        &self,
-        request: Request<GetVectorsRequest>,
-    ) -> Result<Response<GetVectorsResponse>, Status> {
-        let request = request.into_inner();
-        let segment_uuid = match Uuid::parse_str(&request.segment_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Segment UUID"));
-            }
-        };
-
-        let collection_uuid = match Uuid::parse_str(&request.collection_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Collection UUID"));
-            }
-        };
-        let collection_uuid = CollectionUuid(collection_uuid);
-
-        let (collection_version, log_position) = match request.version_context {
-            Some(version_context) => (
-                version_context.collection_version,
-                version_context.log_position,
-            ),
-            None => {
-                return Err(Status::invalid_argument("No version context provided"));
-            }
-        };
-
-        let dispatcher = match self.dispatcher {
-            Some(ref dispatcher) => dispatcher.clone(),
-            None => {
-                return Err(Status::internal("No dispatcher found"));
-            }
-        };
-
-        let system = match self.system {
-            Some(ref system) => system,
-            None => {
-                return Err(Status::internal("No system found"));
-            }
-        };
-
-        let orchestrator = GetVectorsOrchestrator::new(
-            system.clone(),
-            request.ids,
-            segment_uuid,
-            collection_uuid,
-            self.log.clone(),
-            self.sysdb.clone(),
-            dispatcher,
-            self.blockfile_provider.clone(),
-            collection_version,
-            log_position,
-        );
-        let result = orchestrator.run().await;
-        let mut result = match result {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::error!("Error running orchestrator: {}", e);
-                return Err(Status::new(
-                    e.code().into(),
-                    format!("Error running orchestrator: {}", e),
-                ));
-            }
-        };
-
-        let mut output = Vec::new();
-        let id_drain = result.ids.drain(..);
-        let vector_drain = result.vectors.drain(..);
-
-        for (id, vector) in id_drain.zip(vector_drain) {
-            let vector_len = vector.len();
-            let proto_vector = match (vector, ScalarEncoding::FLOAT32, vector_len).try_into() {
-                Ok(vector) => vector,
-                Err(_) => {
-                    return Err(Status::internal("Error converting vector"));
-                }
-            };
-
-            let proto_vector_record = chroma_proto::VectorEmbeddingRecord {
-                id,
-                vector: Some(proto_vector),
-            };
-            output.push(proto_vector_record);
-        }
-
-        let response = chroma_proto::GetVectorsResponse { records: output };
-        Ok(Response::new(response))
-    }
-
-    async fn query_metadata_instrumented(
-        &self,
-        request: Request<QueryMetadataRequest>,
-    ) -> Result<Response<QueryMetadataResponse>, Status> {
-        let request = request.into_inner();
-        let segment_uuid = match Uuid::parse_str(&request.segment_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                tracing::error!("Invalid Segment UUID");
-                return Err(Status::invalid_argument("Invalid Segment UUID"));
-            }
-        };
-
-        let collection_uuid = match Uuid::parse_str(&request.collection_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Collection UUID"));
-            }
-        };
-        let collection_uuid = CollectionUuid(collection_uuid);
-
-        let (collection_version, log_position) = match request.version_context {
-            Some(version_context) => (
-                version_context.collection_version,
-                version_context.log_position,
-            ),
-            None => {
-                return Err(Status::invalid_argument("No version context provided"));
-            }
-        };
-
-        let dispatcher = match self.dispatcher {
-            Some(ref dispatcher) => dispatcher,
-            None => {
-                tracing::error!("No dispatcher found");
-                return Err(Status::internal("No dispatcher found"));
-            }
-        };
-
-        let system = match self.system {
-            Some(ref system) => system,
-            None => {
-                tracing::error!("No system found");
-                return Err(Status::internal("No system found"));
-            }
-        };
-
-        // If no ids are provided, pass None to the orchestrator
-        let query_ids = request.ids.map(|uids| uids.ids);
-
-        let where_clause = match request.r#where {
-            Some(where_clause) => match where_clause.try_into() {
-                Ok(where_clause) => Some(where_clause),
-                Err(_) => {
-                    tracing::error!("Error converting where clause");
-                    return Err(Status::internal(
-                        "Error converting where clause".to_string(),
-                    ));
-                }
-            },
-            None => None,
-        };
-
-        let where_document_clause = match request.where_document {
-            Some(where_document_clause) => match where_document_clause.try_into() {
-                Ok(where_document_clause) => Some(where_document_clause),
-                Err(_) => {
-                    tracing::error!("Error converting where document clause");
-                    return Err(Status::internal(
-                        "Error converting where document clause".to_string(),
-                    ));
-                }
-            },
-            None => None,
-        };
-
-        let clause = match (where_clause, where_document_clause) {
-            (Some(wc), Some(wdc)) => Some(Where::conjunction(vec![wc, wdc])),
-            (Some(c), None) | (None, Some(c)) => Some(c),
-            _ => None,
-        };
-
-        let orchestrator = GetOrchestrator::new(
-            self.blockfile_provider.clone(),
-            dispatcher.clone(),
-            // TODO: Load the configuration for this
-            1000,
-            FetchLogOperator {
-                log_client: self.log.clone(),
-                batch_size: 100,
-                start_log_offset_id: log_position as u32 + 1,
-                maximum_fetch_count: None,
-                collection_uuid,
-            },
-            FetchSegmentOperator {
-                sysdb: self.sysdb.clone(),
-                vector_uuid: None,
-                metadata_uuid: Some(segment_uuid),
-                record_uuid: None,
-                collection_uuid,
-                collection_version,
-            },
-            FilterOperator {
-                query_ids,
-                where_clause: clause,
-            },
-            LimitOperator {
-                skip: request.offset.unwrap_or_default(),
-                fetch: request.limit,
-            },
-            ProjectionOperator {
-                document: request.include_metadata,
-                embedding: request.include_metadata,
-                metadata: request.include_metadata,
-            },
-        );
-
-        let result = orchestrator.run(system.clone()).await;
-        let result = match result {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::error!("Error running orchestrator: {}", e);
-                return Err(Status::new(
-                    e.code().into(),
-                    format!("Error running orchestrator: {}", e),
-                ));
-            }
-        };
-
-        let mut output = Vec::new();
-        for record in result.records {
-            let metadata = if request.include_metadata {
-                let mut meta = record.metadata.unwrap_or_default();
-
-                // The transport layer assumes the document exists in the metadata
-                // with the special key "chroma:document"
-                if let Some(doc) = record.document {
-                    meta.insert("chroma:document".to_string(), MetadataValue::Str(doc));
-                }
-                Some(chroma_proto::UpdateMetadata::from(meta))
-            } else {
-                None
-            };
-
-            output.push(chroma_proto::MetadataEmbeddingRecord {
-                id: record.id,
-                metadata,
-            });
-        }
-
-        // This is an implementation stub
-        let response = chroma_proto::QueryMetadataResponse { records: output };
-        Ok(Response::new(response))
     }
 }
 
 #[tonic::async_trait]
-impl chroma_proto::vector_reader_server::VectorReader for WorkerServer {
-    async fn get_vectors(
-        &self,
-        request: Request<GetVectorsRequest>,
-    ) -> Result<Response<GetVectorsResponse>, Status> {
+impl QueryExecutor for WorkerServer {
+    async fn count(&self, count: Request<CountPlan>) -> Result<Response<CountResult>, Status> {
         // Note: We cannot write a middleware that instruments every service rpc
         // with a span because of https://github.com/hyperium/tonic/pull/1202.
-        let request_span = trace_span!(
-            "Get vectors",
-            segment_id = request.get_ref().segment_id,
-            ids = ?request.get_ref().ids
+        let count_span = trace_span!(
+            "CountPlan",
+            count = ?count
         );
-
-        let instrumented_span = wrap_span_with_parent_context(request_span, request.metadata());
-        self.get_vectors_instrumented(request)
+        let instrumented_span = wrap_span_with_parent_context(count_span, count.metadata());
+        self.orchestrate_count(count)
             .instrument(instrumented_span)
             .await
     }
 
-    async fn query_vectors(
-        &self,
-        request: Request<QueryVectorsRequest>,
-    ) -> Result<Response<QueryVectorsResponse>, Status> {
+    async fn get(&self, get: Request<GetPlan>) -> Result<Response<GetResult>, Status> {
         // Note: We cannot write a middleware that instruments every service rpc
         // with a span because of https://github.com/hyperium/tonic/pull/1202.
-        let query_span = trace_span!(
-            "Query vectors",
-            k = request.get_ref().k,
-            segment_id = request.get_ref().segment_id,
-            include_embeddings = request.get_ref().include_embeddings,
-            allowed_ids = ?request.get_ref().allowed_ids
+        let get_span = trace_span!(
+            "GetPlan",
+            get = ?get
         );
-        let instrumented_span = wrap_span_with_parent_context(query_span, request.metadata());
-        self.query_vectors_instrumented(request)
+        let instrumented_span = wrap_span_with_parent_context(get_span, get.metadata());
+        self.orchestrate_get(get)
             .instrument(instrumented_span)
             .await
     }
-}
 
-#[tonic::async_trait]
-impl chroma_proto::metadata_reader_server::MetadataReader for WorkerServer {
-    async fn count_records(
-        &self,
-        request: Request<CountRecordsRequest>,
-    ) -> Result<Response<CountRecordsResponse>, Status> {
-        let request = request.into_inner();
-        let segment_uuid = match Uuid::parse_str(&request.segment_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Segment UUID"));
-            }
-        };
-        let collection_uuid = match Uuid::parse_str(&request.collection_id) {
-            Ok(uuid) => uuid,
-            Err(_) => {
-                return Err(Status::invalid_argument("Invalid Collection UUID"));
-            }
-        };
-        let collection_uuid = CollectionUuid(collection_uuid);
-
-        let (collection_version, log_position) = match request.version_context {
-            Some(version_context) => (
-                version_context.collection_version,
-                version_context.log_position,
-            ),
-            None => {
-                return Err(Status::invalid_argument("No version context provided"));
-            }
-        };
-
-        let dispatcher = match self.dispatcher {
-            Some(ref dispatcher) => dispatcher,
-            None => {
-                return Err(Status::internal("No dispatcher found"));
-            }
-        };
-
-        let system = match self.system {
-            Some(ref system) => system,
-            None => {
-                return Err(Status::internal("No system found"));
-            }
-        };
-
-        let orchestrator = CountQueryOrchestrator::new(
-            system.clone(),
-            &segment_uuid,
-            &collection_uuid,
-            self.log.clone(),
-            self.sysdb.clone(),
-            dispatcher.clone(),
-            self.blockfile_provider.clone(),
-            collection_version,
-            log_position,
+    async fn knn(&self, knn: Request<KnnPlan>) -> Result<Response<KnnBatchResult>, Status> {
+        // Note: We cannot write a middleware that instruments every service rpc
+        // with a span because of https://github.com/hyperium/tonic/pull/1202.
+        let knn_span = trace_span!(
+            "KnnPlan",
+            knn = ?knn
         );
-
-        let result = orchestrator.run().await;
-        let c = match result {
-            Ok(r) => {
-                println!("Count value {}", r);
-                r
-            }
-            Err(e) => {
-                println!("Error! {:?}", e);
-                // TODO: Return 0 for now but should return an error at some point.
-                0
-            }
-        };
-        let response = CountRecordsResponse { count: c as u32 };
-        Ok(Response::new(response))
-    }
-
-    async fn query_metadata(
-        &self,
-        request: Request<QueryMetadataRequest>,
-    ) -> Result<Response<QueryMetadataResponse>, Status> {
-        let query_span = trace_span!("Query metadata", segment_id = request.get_ref().segment_id);
-        let instrumented_span = wrap_span_with_parent_context(query_span, request.metadata());
-        self.query_metadata_instrumented(request)
+        let instrumented_span = wrap_span_with_parent_context(knn_span, knn.metadata());
+        self.orchestrate_knn(knn)
             .instrument(instrumented_span)
             .await
     }
