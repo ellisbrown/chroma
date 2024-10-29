@@ -53,11 +53,11 @@ class DistributedExecutor(Executor):
         )
 
     @overrides
-    def count(self, count: CountPlan) -> int:
-        executor = self._grpc_executuor_stub(count.scan)
-        count.scan = self._segment_scan(count.scan)
+    def count(self, plan: CountPlan) -> int:
+        executor = self._grpc_executuor_stub(plan.scan)
+        plan.scan = self._segment_scan(plan.scan)
         try:
-            count_result = executor.Count(convert.to_proto_count_plan(count))
+            count_result = executor.Count(convert.to_proto_count_plan(plan))
         except grpc.RpcError as rpc_error:
             if (
                 rpc_error.code() == grpc.StatusCode.INTERNAL
@@ -68,11 +68,11 @@ class DistributedExecutor(Executor):
         return convert.from_proto_count_result(count_result)
 
     @overrides
-    def get(self, get: GetPlan) -> GetResult:
-        executor = self._grpc_executuor_stub(get.scan)
-        get.scan = self._segment_scan(get.scan)
+    def get(self, plan: GetPlan) -> GetResult:
+        executor = self._grpc_executuor_stub(plan.scan)
+        plan.scan = self._segment_scan(plan.scan)
         try:
-            get_result = executor.Get(convert.to_proto_get_plan(get))
+            get_result = executor.Get(convert.to_proto_get_plan(plan))
         except grpc.RpcError as rpc_error:
             if (
                 rpc_error.code() == grpc.StatusCode.INTERNAL
@@ -85,22 +85,22 @@ class DistributedExecutor(Executor):
         ids = [record["id"] for record in records]
         embeddings = (
             [record["embedding"] for record in records]
-            if get.projection.embedding
+            if plan.projection.embedding
             else None
         )
         documents = (
             [record["document"] for record in records]
-            if get.projection.document
+            if plan.projection.document
             else None
         )
         uris = (
             [_uri(record["metadata"]) for record in records]
-            if get.projection.uri
+            if plan.projection.uri
             else None
         )
         metadatas = (
             [_clean_metadata(record["metadata"]) for record in records]
-            if get.projection.metadata
+            if plan.projection.metadata
             else None
         )
 
@@ -112,15 +112,15 @@ class DistributedExecutor(Executor):
             uris=uris,  # type: ignore[typeddict-item]
             data=None,
             metadatas=metadatas,  # type: ignore[typeddict-item]
-            included=get.projection.included,
+            included=plan.projection.included,
         )
 
     @overrides
-    def knn(self, knn: KNNPlan) -> QueryResult:
-        executor = self._grpc_executuor_stub(knn.scan)
-        knn.scan = self._segment_scan(knn.scan)
+    def knn(self, plan: KNNPlan) -> QueryResult:
+        executor = self._grpc_executuor_stub(plan.scan)
+        plan.scan = self._segment_scan(plan.scan)
         try:
-            knn_result = executor.KNN(convert.to_proto_knn_plan(knn))
+            knn_result = executor.KNN(convert.to_proto_knn_plan(plan))
         except grpc.RpcError as rpc_error:
             if (
                 rpc_error.code() == grpc.StatusCode.INTERNAL
@@ -136,7 +136,7 @@ class DistributedExecutor(Executor):
                 [record["record"]["embedding"] for record in records]
                 for records in results
             ]
-            if knn.projection.embedding
+            if plan.projection.embedding
             else None
         )
         documents = (
@@ -144,7 +144,7 @@ class DistributedExecutor(Executor):
                 [record["record"]["document"] for record in records]
                 for records in results
             ]
-            if knn.projection.document
+            if plan.projection.document
             else None
         )
         uris = (
@@ -152,7 +152,7 @@ class DistributedExecutor(Executor):
                 [_uri(record["record"]["metadata"]) for record in records]
                 for records in results
             ]
-            if knn.projection.uri
+            if plan.projection.uri
             else None
         )
         metadatas = (
@@ -160,12 +160,12 @@ class DistributedExecutor(Executor):
                 [_clean_metadata(record["record"]["metadata"]) for record in records]
                 for records in results
             ]
-            if knn.projection.metadata
+            if plan.projection.metadata
             else None
         )
         distances = (
             [[record["distance"] for record in records] for records in results]
-            if knn.projection.rank
+            if plan.projection.rank
             else None
         )
 
@@ -178,7 +178,7 @@ class DistributedExecutor(Executor):
             data=None,
             metadatas=metadatas,  # type: ignore[typeddict-item]
             distances=distances,  # type: ignore[typeddict-item]
-            included=knn.projection.included,
+            included=plan.projection.included,
         )
 
     def _segment_scan(self, scan: Scan) -> SegmentScan:
