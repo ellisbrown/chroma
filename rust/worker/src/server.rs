@@ -191,7 +191,7 @@ impl WorkerServer {
             dispatcher.clone(),
             self.blockfile_provider.clone(),
             fetch_segment_operator.collection_version,
-            fetch_log_operator.start_log_offset_id as u64,
+            fetch_log_operator.start_log_offset_id as u64 - 1,
         );
 
         match counter.run().await {
