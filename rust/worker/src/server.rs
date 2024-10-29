@@ -1,34 +1,43 @@
 use std::iter::once;
 use std::str::FromStr;
 
-use crate::config::QueryServiceConfig;
-use crate::execution::dispatcher::Dispatcher;
-use crate::execution::operators::fetch_log::FetchLogOperator;
-use crate::execution::operators::fetch_segment::FetchSegmentOperator;
-use crate::execution::operators::knn_projection::KnnProjectionOperator;
-use crate::execution::orchestration::get::GetOrchestrator;
-use crate::execution::orchestration::knn::{KnnError, KnnFilterOrchestrator, KnnOrchestrator};
-use crate::execution::orchestration::CountQueryOrchestrator;
-use crate::log::log::Log;
-use crate::sysdb::sysdb::SysDb;
-use crate::system::{ComponentHandle, System};
-use crate::tracing::util::wrap_span_with_parent_context;
-use crate::utils::convert::{from_proto_knn, to_proto_knn_batch_result};
-use async_trait::async_trait;
 use chroma_blockstore::provider::BlockfileProvider;
 use chroma_config::Configurable;
 use chroma_error::ChromaError;
 use chroma_index::hnsw_provider::HnswIndexProvider;
-use chroma_types::chroma_proto::query_executor_server::QueryExecutor;
-use chroma_types::chroma_proto::{
-    self, CountPlan, CountResult, GetPlan, GetResult, KnnBatchResult, KnnPlan,
+use chroma_types::{
+    chroma_proto::{
+        self, query_executor_server::QueryExecutor, CountPlan, CountResult, GetPlan, GetResult,
+        KnnBatchResult, KnnPlan,
+    },
+    CollectionUuid,
 };
-use chroma_types::CollectionUuid;
 use futures::future::try_join_all;
 use tokio::signal::unix::{signal, SignalKind};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{trace_span, Instrument};
 use uuid::Uuid;
+
+use crate::{
+    config::QueryServiceConfig,
+    execution::{
+        dispatcher::Dispatcher,
+        operators::{
+            fetch_log::FetchLogOperator, fetch_segment::FetchSegmentOperator,
+            knn_projection::KnnProjectionOperator,
+        },
+        orchestration::{
+            get::GetOrchestrator,
+            knn::{KnnError, KnnFilterOrchestrator, KnnOrchestrator},
+            CountQueryOrchestrator,
+        },
+    },
+    log::log::Log,
+    sysdb::sysdb::SysDb,
+    system::{ComponentHandle, System},
+    tracing::util::wrap_span_with_parent_context,
+    utils::convert::{from_proto_knn, to_proto_knn_batch_result},
+};
 
 #[derive(Clone)]
 pub struct WorkerServer {
@@ -44,7 +53,7 @@ pub struct WorkerServer {
     port: u16,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Configurable<QueryServiceConfig> for WorkerServer {
     async fn try_from_config(config: &QueryServiceConfig) -> Result<Self, Box<dyn ChromaError>> {
         let sysdb_config = &config.sysdb;
