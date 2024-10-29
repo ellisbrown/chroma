@@ -1,11 +1,11 @@
 from collections import defaultdict
 from threading import Lock
-from typing import Dict, Optional, Sequence, Type
+from typing import Dict, Sequence
 from uuid import UUID, uuid4
 
 from overrides import override
 
-from chromadb.config import System, get_class
+from chromadb.config import System
 from chromadb.db.system import SysDB
 from chromadb.segment import (
     SegmentImplementation,
@@ -18,19 +18,7 @@ from chromadb.telemetry.opentelemetry import (
     OpenTelemetryGranularity,
     trace_method,
 )
-from chromadb.types import Collection, Metadata, Operation, Segment, SegmentScope
-
-# TODO: it is odd that the segment manager is different for distributed vs local
-# implementations.  This should be refactored to be more consistent and shared.
-# needed in this is the ability to specify the desired segment types for a collection
-# It is odd that segment manager is coupled to the segment implementation. We need to rethink
-# this abstraction.
-
-SEGMENT_TYPE_IMPLS = {
-    SegmentType.SQLITE: "chromadb.segment.impl.metadata.sqlite.SqliteMetadataSegment",
-    SegmentType.HNSW_DISTRIBUTED: "chromadb.segment.impl.vector.grpc_segment.GrpcVectorSegment",
-    SegmentType.BLOCKFILE_METADATA: "chromadb.segment.impl.metadata.grpc_segment.GrpcMetadataSegment",
-}
+from chromadb.types import Collection, Operation, Segment, SegmentScope
 
 
 class DistributedSegmentManager(SegmentManager):
@@ -61,14 +49,26 @@ class DistributedSegmentManager(SegmentManager):
     )
     @override
     def create_segments(self, collection: Collection) -> Sequence[Segment]:
-        vector_segment = _segment(
-            SegmentType.HNSW_DISTRIBUTED, SegmentScope.VECTOR, collection
+        vector_segment = Segment(
+            id=uuid4(),
+            type=SegmentType.HNSW_DISTRIBUTED.value,
+            scope=SegmentScope.VECTOR,
+            collection=collection.id,
+            metadata=None,
         )
-        metadata_segment = _segment(
-            SegmentType.BLOCKFILE_METADATA, SegmentScope.METADATA, collection
+        metadata_segment = Segment(
+            id=uuid4(),
+            type=SegmentType.BLOCKFILE_METADATA.value,
+            scope=SegmentScope.METADATA,
+            collection=collection.id,
+            metadata=None,
         )
-        record_segment = _segment(
-            SegmentType.BLOCKFILE_RECORD, SegmentScope.RECORD, collection
+        record_segment = Segment(
+            id=uuid4(),
+            type=SegmentType.BLOCKFILE_RECORD.value,
+            scope=SegmentScope.RECORD,
+            collection=collection.id,
+            metadata=None,
         )
         return [vector_segment, record_segment, metadata_segment]
 
@@ -83,10 +83,8 @@ class DistributedSegmentManager(SegmentManager):
     )
     def get_segment(self, collection_id: UUID, scope: SegmentScope) -> Segment:
         if scope not in self._segment_cache[collection_id]:
-            segments = self._sysdb.get_segments(collection=collection_id, scope=scope)
-            known_types = set([k.value for k in SEGMENT_TYPE_IMPLS.keys()])
-            # Get the first segment of a known type
-            segment = next(filter(lambda s: s["type"] in known_types, segments))
+            # There should be exactly one segment per scope for a collection
+            segment = self._sysdb.get_segments(collection=collection_id, scope=scope)[0]
             # TODO: Register a callback to update the segment when it gets moved
             # self._segment_directory.register_updated_segment_callback()
             self._segment_cache[collection_id][scope] = segment
@@ -110,38 +108,3 @@ class DistributedSegmentManager(SegmentManager):
     @override
     def hint_use_collection(self, collection_id: UUID, hint_type: Operation) -> None:
         pass
-
-    # TODO: rethink duplication from local segment manager
-    def _cls(self, segment: Segment) -> Type[SegmentImplementation]:
-        classname = SEGMENT_TYPE_IMPLS[SegmentType(segment["type"])]
-        cls = get_class(classname, SegmentImplementation)
-        return cls
-
-    def _instance(self, segment: Segment) -> SegmentImplementation:
-        if segment["id"] not in self._instances:
-            cls = self._cls(segment)
-            instance = cls(self._system, segment)
-            instance.start()
-            self._instances[segment["id"]] = instance
-        return self._instances[segment["id"]]
-
-
-# TODO: rethink duplication from local segment manager
-def _segment(type: SegmentType, scope: SegmentScope, collection: Collection) -> Segment:
-    """Create a metadata dict, propagating metadata correctly for the given segment type."""
-
-    metadata: Optional[Metadata] = None
-    # For the segment types with python implementations, we can propagate metadata
-    if type in SEGMENT_TYPE_IMPLS:
-        cls = get_class(SEGMENT_TYPE_IMPLS[type], SegmentImplementation)
-        collection_metadata = collection.metadata
-        if collection_metadata:
-            metadata = cls.propagate_collection_metadata(collection_metadata)
-
-    return Segment(
-        id=uuid4(),
-        type=type.value,
-        scope=scope,
-        collection=collection.id,
-        metadata=metadata,
-    )

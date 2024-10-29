@@ -136,11 +136,11 @@ impl WorkerServer {
             .ok_or(Status::invalid_argument("Invalid Collection"))?;
         let collection_uuid = CollectionUuid::from_str(&collection.id)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
-        let knn_uuid = Uuid::parse_str(&collection.id)
+        let knn_uuid = Uuid::parse_str(&scan.knn_id)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
-        let metadata_uuid = Uuid::parse_str(&collection.id)
+        let metadata_uuid = Uuid::parse_str(&scan.metadata_id)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
-        let record_uuid = Uuid::parse_str(&collection.id)
+        let record_uuid = Uuid::parse_str(&scan.record_id)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
         Ok((
             FetchLogOperator {

@@ -576,11 +576,12 @@ def to_proto_scan(scan: SegmentScan) -> proto.ScanOperator:
 
 
 def to_proto_filter(filter: Filter) -> proto.FilterOperator:
+    print(filter.user_ids)
     return proto.FilterOperator(
-        ids=proto.UserIds(ids=filter.user_ids),
-        where=to_proto_where(filter.where) if filter.where is not None else None,
+        ids=proto.UserIds(ids=filter.user_ids) if filter.user_ids is not None else None,
+        where=to_proto_where(filter.where) if filter.where else None,
         where_document=to_proto_where_document(filter.where_document)
-        if filter.where_document is not None
+        if filter.where_document
         else None,
     )
 
@@ -588,7 +589,7 @@ def to_proto_filter(filter: Filter) -> proto.FilterOperator:
 def to_proto_knn(knn: KNN) -> proto.KNNOperator:
     return proto.KNNOperator(
         embeddings=[
-            to_proto_vector(vector=embedding, encoding=ScalarEncoding)
+            to_proto_vector(vector=embedding, encoding=ScalarEncoding.FLOAT32)
             for embedding in knn.embeddings
         ],
         fetch=knn.fetch,
@@ -634,8 +635,8 @@ def from_proto_projection_record(record: proto.ProjectionRecord) -> ProjectionRe
     return ProjectionRecord(
         id=record.id,
         document=record.document,
-        embedding=from_proto_vector(record.vector)[0]
-        if record.vector is not None
+        embedding=from_proto_vector(record.embedding)[0]
+        if record.embedding is not None
         else None,
         metadata=from_proto_metadata(record.metadata),
     )
