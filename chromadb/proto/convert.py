@@ -635,7 +635,7 @@ def to_proto_get_plan(get: GetPlan) -> proto.GetPlan:
 def from_proto_projection_record(record: proto.ProjectionRecord) -> ProjectionRecord:
     return ProjectionRecord(
         id=record.id,
-        document=record.document,
+        document=record.document if record.document else None,
         embedding=from_proto_vector(record.embedding)[0]
         if record.embedding is not None
         else None,
