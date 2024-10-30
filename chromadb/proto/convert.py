@@ -252,6 +252,7 @@ def to_proto_collection(collection: Collection) -> proto.Collection:
         dimension=collection["dimension"],
         tenant=collection["tenant"],
         database=collection["database"],
+        log_position=collection["log_position"],
         version=collection["version"],
     )
 
