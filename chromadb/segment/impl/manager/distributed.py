@@ -13,6 +13,7 @@ from chromadb.segment import (
     SegmentType,
 )
 from chromadb.segment.distributed import SegmentDirectory
+from chromadb.segment.impl.vector.hnsw_params import PersistentHnswParams
 from chromadb.telemetry.opentelemetry import (
     OpenTelemetryClient,
     OpenTelemetryGranularity,
@@ -54,7 +55,9 @@ class DistributedSegmentManager(SegmentManager):
             type=SegmentType.HNSW_DISTRIBUTED.value,
             scope=SegmentScope.VECTOR,
             collection=collection.id,
-            metadata=None,
+            metadata=PersistentHnswParams.extract(collection.metadata)
+            if collection.metadata
+            else None,
         )
         metadata_segment = Segment(
             id=uuid4(),
