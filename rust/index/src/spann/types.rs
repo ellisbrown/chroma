@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::error;
 use chroma_blockstore::{provider::BlockfileProvider, BlockfileWriter};
 use chroma_distance::DistanceFunction;
 use chroma_error::{ChromaError, ErrorCodes};
 use chroma_types::SpannPostingList;
+use parking_lot::RwLock;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -19,7 +20,8 @@ pub struct SpannIndexWriter {
     // The blockfile also contains next id for the head.
     posting_list_writer: BlockfileWriter,
     // Version number of each point.
-    versions_map: HashMap<u32, u32>,
+    // TODO(Sanket): Finer grained locking for this map in future.
+    versions_map: Arc<RwLock<HashMap<u32, u32>>>,
 }
 
 #[derive(Error, Debug)]
@@ -53,7 +55,7 @@ impl SpannIndexWriter {
             hnsw_index,
             hnsw_provider,
             posting_list_writer,
-            versions_map,
+            versions_map: Arc::new(RwLock::new(versions_map)),
         }
     }
 
@@ -194,4 +196,11 @@ impl SpannIndexWriter {
             versions_map,
         ))
     }
+
+    pub fn add_versions_map(&self, id: u32) {
+        // 0 means deleted. Version counting starts from 1.
+        self.versions_map.write().insert(id, 1);
+    }
+
+    pub async fn add_new_record_to_postings_list(&self, id: u32, embeddings: &[f32]) {}
 }
