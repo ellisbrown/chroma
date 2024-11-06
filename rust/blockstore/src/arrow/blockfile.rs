@@ -679,7 +679,7 @@ mod tests {
         let flusher = writer.commit::<&str, Vec<u32>>().await.unwrap();
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
-        let reader = blockfile_provider.open::<&str, &[u32]>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, &[u32]>(&id).await.unwrap();
 
         let count = reader.count().await;
         match count {
@@ -717,7 +717,7 @@ mod tests {
             let flusher = writer.commit::<&str, u32>().await.unwrap();
             flusher.flush::<&str, u32>().await.unwrap();
 
-            let reader = blockfile_provider.open::<&str, u32>(&id).await.unwrap();
+            let reader = blockfile_provider.read::<&str, u32>(&id).await.unwrap();
             let prefix_query = format!("{}/{}", "prefix", prefix_for_query);
             println!("Query {}, num_keys {}", prefix_query, num_keys);
             let range_iter =
@@ -782,7 +782,7 @@ mod tests {
             let flusher = writer.commit::<&str, u32>().await.unwrap();
             flusher.flush::<&str, u32>().await.unwrap();
 
-            let reader = blockfile_provider.open::<&str, u32>(&id).await.unwrap();
+            let reader = blockfile_provider.read::<&str, u32>(&id).await.unwrap();
             let query = format!("{}/{}", "key", query_key);
             println!("Query {}", query);
             println!("Operation {:?}", operation);
@@ -943,7 +943,7 @@ mod tests {
         let flusher = writer.commit::<&str, Vec<u32>>().await.unwrap();
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
-        let reader = blockfile_provider.open::<&str, &[u32]>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, &[u32]>(&id).await.unwrap();
 
         let value = reader.get(prefix_1, key1).await.unwrap();
         assert_eq!(value, [1, 2, 3]);
@@ -981,7 +981,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_1)
+            .read::<&str, &[u32]>(&id_1)
             .await
             .unwrap();
 
@@ -1016,7 +1016,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_2)
+            .read::<&str, &[u32]>(&id_2)
             .await
             .unwrap();
         for i in 0..5 {
@@ -1050,7 +1050,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_3)
+            .read::<&str, &[u32]>(&id_3)
             .await
             .unwrap();
         for i in n..n * 2 {
@@ -1103,7 +1103,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_1)
+            .read::<&str, &[u32]>(&id_1)
             .await
             .unwrap();
 
@@ -1146,7 +1146,7 @@ mod tests {
         let flusher = writer.commit::<&str, String>().await.unwrap();
         flusher.flush::<&str, String>().await.unwrap();
 
-        let reader = blockfile_provider.open::<&str, &str>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, &str>(&id).await.unwrap();
         for i in 0..n {
             let key = format!("{:04}", i);
             let value = reader.get("key", &key).await.unwrap();
@@ -1183,7 +1183,7 @@ mod tests {
         let flusher = writer.commit::<f32, String>().await.unwrap();
         flusher.flush::<f32, String>().await.unwrap();
 
-        let reader = provider.open::<f32, &str>(&id).await.unwrap();
+        let reader = provider.read::<f32, &str>(&id).await.unwrap();
         for i in 0..n {
             let key = i as f32;
             let value = reader.get("key", key).await.unwrap();
@@ -1227,7 +1227,7 @@ mod tests {
             .unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, roaring::RoaringBitmap>(&id)
+            .read::<&str, roaring::RoaringBitmap>(&id)
             .await
             .unwrap();
         for i in 0..n {
@@ -1270,7 +1270,7 @@ mod tests {
         let flusher = writer.commit::<u32, u32>().await.unwrap();
         flusher.flush::<u32, u32>().await.unwrap();
 
-        let reader = blockfile_provider.open::<u32, u32>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<u32, u32>(&id).await.unwrap();
         for i in 0..n {
             let key = i as u32;
             let value = reader.get("key", key).await.unwrap();
@@ -1315,7 +1315,7 @@ mod tests {
         flusher.flush::<&str, &DataRecord>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, DataRecord>(&id)
+            .read::<&str, DataRecord>(&id)
             .await
             .unwrap();
         for i in 0..n {
@@ -1366,7 +1366,7 @@ mod tests {
         let flusher = writer.commit::<&str, String>().await.unwrap();
         flusher.flush::<&str, String>().await.unwrap();
 
-        let reader = blockfile_provider.open::<&str, &str>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, &str>(&id).await.unwrap();
         let val_1 = reader.get("key", "1").await.unwrap();
         let val_2 = reader.get("key", "2").await.unwrap();
 
@@ -1405,7 +1405,7 @@ mod tests {
         let flusher = writer.commit::<&str, String>().await.unwrap();
         flusher.flush::<&str, String>().await.unwrap();
 
-        let reader = blockfile_provider.open::<&str, &str>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, &str>(&id).await.unwrap();
         for i in 0..n {
             let key = format!("{:04}", i);
             let value = reader.get("key", &key).await.unwrap();
@@ -1432,7 +1432,7 @@ mod tests {
         flusher.flush::<&str, String>().await.unwrap();
 
         // Check that the deleted keys are gone
-        let reader = blockfile_provider.open::<&str, &str>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, &str>(&id).await.unwrap();
         for i in 0..n {
             let key = format!("{:04}", i);
             if deleted_keys.contains(&i) {
@@ -1472,7 +1472,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_1)
+            .read::<&str, &[u32]>(&id_1)
             .await
             .unwrap();
 
@@ -1537,7 +1537,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_2)
+            .read::<&str, &[u32]>(&id_2)
             .await
             .unwrap();
 
@@ -1570,7 +1570,7 @@ mod tests {
         flusher.flush::<&str, Vec<u32>>().await.unwrap();
 
         let reader = blockfile_provider
-            .open::<&str, &[u32]>(&id_3)
+            .read::<&str, &[u32]>(&id_3)
             .await
             .unwrap();
 
@@ -1610,7 +1610,7 @@ mod tests {
         let flusher = writer.commit::<&str, u32>().await.unwrap();
         flusher.flush::<&str, u32>().await.unwrap();
 
-        let reader = blockfile_provider.open::<&str, u32>(&id).await.unwrap();
+        let reader = blockfile_provider.read::<&str, u32>(&id).await.unwrap();
         let value = reader.get("prefix", fixed_key).await.unwrap();
         assert_eq!(value, n - 1);
     }
@@ -1735,7 +1735,7 @@ mod tests {
         );
 
         let reader = blockfile_provider
-            .open::<&str, &str>(&first_write_id)
+            .read::<&str, &str>(&first_write_id)
             .await
             .unwrap();
         let reader = match reader {
@@ -1791,7 +1791,7 @@ mod tests {
         // Verify that the counts were correctly migrated
 
         let blockfile_reader = blockfile_provider
-            .open::<&str, &str>(&second_write_id)
+            .read::<&str, &str>(&second_write_id)
             .await
             .unwrap();
 
